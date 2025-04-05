@@ -10,6 +10,7 @@ import { getCurrentPosition, vibrateDevice } from '@/utils/locationUtils';
 import { generateRouteOptions, type Route } from '@/utils/mapUtils';
 import { Button } from '@/components/ui/button';
 import { Navigation, ArrowDown, ArrowUp } from 'lucide-react';
+import LoadingSpinner from '@/components/LoadingSpinner';
 
 const Index = () => {
   const [currentLocation, setCurrentLocation] = useState<{ lat: number; lng: number } | null>(null);
@@ -47,7 +48,7 @@ const Index = () => {
   }, []);
   
   // Handle distance submission (either for route finding or target setting)
-  const handleDistanceSubmit = (distance: number, isTargetDistance: boolean) => {
+  const handleDistanceSubmit = async (distance: number, isTargetDistance: boolean) => {
     if (!currentLocation) {
       toast.error("Location not available. Please enable location services.");
       return;
@@ -72,20 +73,21 @@ const Index = () => {
       
       // Generate routes
       try {
-        const generatedRoutes = generateRouteOptions(
+        const generatedRoutes = await generateRouteOptions(
           currentLocation.lat,
           currentLocation.lng,
           distance
         );
         
-        setRoutes(generatedRoutes);
-        if (generatedRoutes.length > 0) {
+        if (generatedRoutes.length === 0) {
+          toast.error("Could not generate any routes. Please try again.");
+        } else {
+          setRoutes(generatedRoutes);
           setActiveRouteId(generatedRoutes[0].id);
+          setIsRunningMode(false);
+          setShowRoutePanel(true);
+          setIsPanelCollapsed(false);
         }
-        
-        setIsRunningMode(false);
-        setShowRoutePanel(true);
-        setIsPanelCollapsed(false);
       } catch (error) {
         console.error("Error generating routes: ", error);
         toast.error("Failed to generate routes. Please try again.");
