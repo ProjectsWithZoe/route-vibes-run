@@ -23,21 +23,20 @@ const fetchRouteFromMapbox = async (
   startLat: number, 
   startLng: number, 
   targetDistance: number,
-  accessToken: string
+  accessToken: string,
+  directionBias: number = Math.random() * 2 * Math.PI // Add direction bias parameter
 ): Promise<Point[]> => {
   // Convert target distance from miles to meters
   const targetMeters = targetDistance * 1609.34;
   
   try {
-    // Generate a destination point roughly in the target distance direction
-    // This is a simplified approach - we'll get a point in a random direction
-    // and let Mapbox's API handle the routing along roads
-    const angle = Math.random() * 2 * Math.PI;
+    // Generate a destination point in the biased direction
+    // This will help create different route options
     const milesPerDegree = 69;
     const distanceFraction = targetDistance * 0.45 / milesPerDegree; // Using less than target distance to allow for road routing
     
-    const destLat = startLat + Math.cos(angle) * distanceFraction;
-    const destLng = startLng + Math.sin(angle) * distanceFraction / Math.cos(startLat * Math.PI / 180);
+    const destLat = startLat + Math.cos(directionBias) * distanceFraction;
+    const destLng = startLng + Math.sin(directionBias) * distanceFraction / Math.cos(startLat * Math.PI / 180);
     
     // Use Mapbox Directions API to get a route between points
     const response = await fetch(
@@ -63,32 +62,57 @@ const fetchRouteFromMapbox = async (
       lat: coord[1]
     }));
     
-    // For loop routes, add the starting point at the end
-    if (points.length > 0) {
-      points.push({ lat: startLat, lng: startLng });
+    // For loop routes, we need to add a return path
+    // Let's create a complete loop by requesting a route back to the start
+    const returnResponse = await fetch(
+      `https://api.mapbox.com/directions/v5/mapbox/walking/${points[points.length-1].lng},${points[points.length-1].lat};${startLng},${startLat}?geometries=geojson&access_token=${accessToken}`
+    );
+    
+    if (returnResponse.ok) {
+      const returnData = await returnResponse.json();
+      
+      if (returnData.routes && returnData.routes.length > 0) {
+        // Skip the first point as it's the same as our last point
+        const returnCoordinates = returnData.routes[0].geometry.coordinates.slice(1);
+        
+        // Add return path points
+        const returnPoints = returnCoordinates.map((coord: number[]): Point => ({
+          lng: coord[0],
+          lat: coord[1]
+        }));
+        
+        points.push(...returnPoints);
+      }
     }
     
     return points;
   } catch (error) {
     console.error('Error fetching Mapbox route:', error);
     
-    // Fallback to a simple circular route if API fails
-    const routePoints: Point[] = [{ lat: startLat, lng: startLng }];
-    const numWaypoints = Math.max(3, Math.floor(targetDistance * 3));
-    const angleStep = (2 * Math.PI) / numWaypoints;
-    const milesPerDegree = 69;
-    const radius = targetDistance / (2 * Math.PI) / milesPerDegree;
-    
-    for (let i = 0; i < numWaypoints; i++) {
-      const angle = i * angleStep;
-      const lat = startLat + Math.cos(angle) * radius;
-      const lng = startLng + Math.sin(angle) * radius / Math.cos(startLat * Math.PI / 180);
-      routePoints.push({ lat, lng });
+    // Improved fallback: Try to get routes in different directions
+    // We'll try to get a route in another direction instead of a simple circular path
+    try {
+      // Try a different direction (90 degrees rotated)
+      const newDirection = directionBias + Math.PI / 2;
+      return await fetchRouteFromMapbox(startLat, startLng, targetDistance, accessToken, newDirection);
+    } catch (secondError) {
+      console.error('Secondary route attempt failed:', secondError);
+      
+      // Last resort: try with a shorter distance
+      if (targetDistance > 0.5) {
+        try {
+          console.log('Attempting with shorter distance');
+          return await fetchRouteFromMapbox(startLat, startLng, targetDistance * 0.7, accessToken, directionBias + Math.PI);
+        } catch (thirdError) {
+          console.error('All route attempts failed:', thirdError);
+          // Final fallback - return just the start point to avoid errors
+          return [{ lat: startLat, lng: startLng }];
+        }
+      } else {
+        // Final fallback - return just the start point to avoid errors
+        return [{ lat: startLat, lng: startLng }];
+      }
     }
-    
-    // Close the loop
-    routePoints.push({ lat: startLat, lng: startLng });
-    return routePoints;
   }
 };
 
@@ -117,39 +141,49 @@ export const generateRouteOptions = async (
   // Get the Mapbox token from localStorage
   const mapboxToken = localStorage.getItem('mapbox_token') || 'YOUR_MAPBOX_TOKEN_HERE';
   
+  // Generate routes with different directional biases for variety
+  const angleStep = (2 * Math.PI) / numRoutes;
+  
   // Generate routes sequentially to avoid overwhelming the API
   for (let i = 0; i < numRoutes; i++) {
     try {
-      // Generate slight variations in target distance and direction for each route
+      // Generate slight variations in target distance for each route
       const variationFactor = 0.85 + Math.random() * 0.3; // Between 0.85 and 1.15
       const adjustedDistance = targetDistance * variationFactor;
+      
+      // Use directional bias for varied routes
+      const directionBias = i * angleStep;
       
       // Fetch route points using Mapbox Directions API
       const routePoints = await fetchRouteFromMapbox(
         startLat, 
         startLng, 
         adjustedDistance,
-        mapboxToken
+        mapboxToken,
+        directionBias
       );
       
-      // Calculate actual route distance
-      let actualDistance = 0;
-      for (let j = 1; j < routePoints.length; j++) {
-        actualDistance += calculateDistance(
-          routePoints[j-1].lat, 
-          routePoints[j-1].lng,
-          routePoints[j].lat,
-          routePoints[j].lng
-        );
+      // Only add route if it has at least 3 points
+      if (routePoints.length > 2) {
+        // Calculate actual route distance
+        let actualDistance = 0;
+        for (let j = 1; j < routePoints.length; j++) {
+          actualDistance += calculateDistance(
+            routePoints[j-1].lat, 
+            routePoints[j-1].lng,
+            routePoints[j].lat,
+            routePoints[j].lng
+          );
+        }
+        
+        routes.push({
+          id: `route-${i}`,
+          points: routePoints,
+          distance: parseFloat(actualDistance.toFixed(2)),
+          description: descriptions[i % descriptions.length],
+          color: colors[i % colors.length]
+        });
       }
-      
-      routes.push({
-        id: `route-${i}`,
-        points: routePoints,
-        distance: parseFloat(actualDistance.toFixed(2)),
-        description: descriptions[i % descriptions.length],
-        color: colors[i % colors.length]
-      });
     } catch (error) {
       console.error(`Error generating route ${i}:`, error);
     }
